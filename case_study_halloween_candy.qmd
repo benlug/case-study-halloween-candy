@@ -1,0 +1,439 @@
+---
+title: "Case Study: Product Development"
+toc: true
+number-sections: true
+format: 
+  pdf:
+    code-line-numbers: true
+    geometry: 
+      - top=30mm
+      - left=30mm
+---
+
+## Executive Summary
+
+Objective: The aim is to expand the private label confectionery range by identifying the ideal characteristics for a successful new product. This analysis examines which features are most popular among consumers to support decision-making.
+
+Key Insights:
+
+    Chocolate-Based Confectionery is Significantly More Popular: The regression model indicates that chocolate increases consumer popularity by 16.2%.
+
+    Combination of Chocolate and Nuts Enhances Popularity: Products containing both chocolate and nuts are on average 16% more popular.
+
+    Different Consumer Groups Prefer Different Sweets: While chocolate products are generally more popular, specific consumer segments prefer fruity candies.
+
+    Fruity Sweets Increase Popularity by 7.4%: In contrast, hard candies reduce popularity by approximately 6.1%.
+
+    Willingness to Pay a Premium for Chocolate-Containing Sweets: Consumers are willing to pay more for chocolate-based confectionery, whereas non-chocolate sweets are less popular even if priced higher.
+
+Recommendations:
+
+    Develop a product based on chocolate.
+
+    Integrate nuts (e.g., peanuts, almonds) into the product.
+
+    Consider developing a second sweet with a fruity flavor to cater to a different consumer segment.
+
+    Implement a differentiated pricing strategy, marketing chocolate-containing products as premium, while offering non-chocolate products at a more competitive price.
+
+## Scenario
+
+The purchasing department wants to expand the private label confectionery range. A new sweet treat is to be created for this purpose. However, there is still disagreement within the project team about the characteristics of the new confectionery.
+
+While some prefer a cookie-based treat, others favor a gummy candy variation. Therefore, the department head has decided to commission a market research company to determine the popularity of the confectionery available on the market. The results of the market research are now available, and you have been tasked with analyzing the data. The goal is to analyze the impact of confectionery characteristics on their popularity and, based on this analysis, to recommend the attributes of a new sweet treat.
+
+## Data
+
+You can find the dataset at: https://github.com/fivethirtyeight/data/tree/master/candy-power-ranking. This dataset is from FiveThirtyEight and is licensed under the Creative Commons Attribution 4.0 International license (https://creativecommons.org/licenses/by/4.0/).
+
+Header | Description
+-------|------------
+`chocolate` | Does it contain chocolate?
+`fruity` | Is it fruit flavored?
+`caramel` | Is there caramel in the candy?
+`peanutalmondy` | Does it contain peanuts, peanut butter or almonds?
+`nougat` | Does it contain nougat?
+`crispedricewafer` | Does it contain crisped rice, wafers, or a cookie component?
+`hard` | Is it a hard candy?
+`bar` | Is it a candy bar?
+`pluribus` | Is it one of many candies in a bag or box?
+`sugarpercent` | The percentile of sugar it falls under within the data set.
+`pricepercent` | The unit price percentile compared to the rest of the set.
+`winpercent` | The overall win percentage according to 269,000 matchups.
+
+# Code
+
+## Libraries, data loading, short overview
+
+```{r, output = FALSE}
+library(tidyverse)
+library(psych)
+library(Hmisc)
+library(randomForest)
+library(factoextra)
+library(mlr3)
+
+set.seed(2024) 
+```
+
+```{r}
+url <- "https://raw.githubusercontent.com/fivethirtyeight/data/master/candy-power-ranking/candy-data.csv"
+candy_dat <- read_csv(url)
+```
+
+```{r}
+# quick first glance 
+str(candy_dat)
+summary(candy_dat)
+```
+
+## Check Missings
+
+```{r}
+sum(is.na(candy_dat))
+```
+
+- no (apparent) missings present in the data
+
+## Encoding
+
+```{r}
+# encode categorical variables and scale winpercent to 0-1
+candy_dat <- candy_dat |>
+  mutate(across(c(chocolate, 
+                  fruity, 
+                  caramel, 
+                  peanutyalmondy, 
+                  nougat, 
+                  crispedricewafer, 
+                  hard, 
+                  bar, 
+                  pluribus), 
+                ~ factor(., levels = c(0, 1), labels = c("No", "Yes")))) |>
+  mutate(winpercent = winpercent/100)
+```
+
+To prepare the data, categorical variables were coded as factors and win percentages were scaled to a range of 0-1 for consistency and easier interpretation.
+
+## EDA
+
+### Ranking based on `winpercent`
+
+Candies were ranked by their win percentage to identify the top and bottom performers:
+
+```{r}
+top20_last20 <- bind_rows(
+  candy_dat |>
+    select(competitorname, winpercent, everything()) |>
+    arrange(desc(winpercent)) |>
+    head(20)
+  ,
+  candy_dat |>
+    select(competitorname, winpercent, everything()) |>
+    arrange(desc(winpercent)) |>
+    tail(20)
+)
+print(top20_last20, n = nrow(top20_last20))
+```
+
+Observations:
+- In the top 20, almost all candies contain chocolate, and many are in the form of bars.
+- Candies containing peanuts or almonds are also common in the top 10.
+- If a candy does not contain chocolate, it is often fruity and comes with more than one candy in a box.
+- In the last 20, only two candies contain chocolate, and many are either fruit-flavored or hard candies.
+- sugarpercent and pricepercent seem to correlate with winpercent.
+- Established brands (Reese's, Twix, Kit Kat) dominate the top ranks; might be an indicator that brand recognition may play a role.
+
+### Distributional information
+
+Overview of the marginal distributions and the dependence structure within the data.
+
+```{r}
+pairs.panels(select(candy_dat, -competitorname), 
+             bg = c("yellow", "blue"), pch = 21, 
+             stars = FALSE)
+```
+
+```{r}
+candy_dat_numeric <- candy_dat |>
+  mutate(across(where(is.factor), ~ ifelse(. == "Yes", 1, 0)))
+(candy_corr <- round(rcorr(as.matrix(select(candy_dat_numeric, -competitorname)))$r, 2))
+```
+
+- Chocolate candies have the highest correlation with winpercent and pricepercent
+  - this can mean that customers either pay a premium for chocolate candies or the product is more expensive to make
+- Strong negative correlation between chocolate and fruity candies -> may be due to different customer types?
+
+#### Correlations with `winpercent` ordered:
+
+```{r}
+winpercent_correlations <- candy_corr[, "winpercent"]
+winpercent_correlations <- tibble(
+  Variable = names(winpercent_correlations),
+  Correlation = winpercent_correlations,
+  row.names = NULL
+)
+winpercent_correlations |> 
+  arrange(desc(abs(Correlation))) |> 
+  filter(Variable != "winpercent")
+```
+
+- `chocolate`, `bar` and `peanutyalmondy` are moderately to strongly correlated with `winpercent`
+  - hypothesis: interaction effect between `chocolate` and `peanutyalmondy`?
+- another interesting aspect is the negative correlation between `fruity` and `hard` suggesting that `fruity` candies are generally less liked. 
+- moderate correlations between the continuous variables. Generally:
+  - higher priced candies tend to be more popular
+  - more sugar leads to higher prices
+  - more sugar leads to more popularity
+
+#### Margins of factor variables
+
+```{r}
+factor_vars_count_wide <- candy_dat |>
+  pivot_longer(cols = chocolate:pluribus, 
+               names_to = "Flavor", values_to = "Level") |> 
+  group_by(Flavor, Level) |> 
+  summarise(Count = n()) |> 
+  pivot_wider(names_from = Level, values_from = Count) |> 
+  print()
+```
+
+Informatio in bar plots:
+
+```{r}
+factor_vars_count_long <- factor_vars_count_wide |> 
+  pivot_longer(cols = c("No", "Yes"), 
+               names_to = "Response", values_to = "Count")
+
+ggplot(factor_vars_count_long, mapping = aes(x = Flavor, y = Count, fill = Response)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Marginal Distributions of Factor Variables",
+       x = "Flavor / Candy Type",
+       y = "Count",
+       fill = "Classification") 
+```
+
+- `chocolate`, `fruity` and `pluribus` have a much higher number of occurrences compared to other variables
+- as previously observed `crispedricewafer` and `nougat` have very low cell counts (N < 10) 
+  -> inference may be difficult due to these balance issues
+
+**Hypothesis**: `chocolate` and `fruity` may be *mutually exclusive*. Some customers might prefer `chocolate` while others prefer `fruity` candies -> dependence
+
+```{r}
+choco_fruity_table <- table(candy_dat$chocolate, candy_dat$fruity)
+print(choco_fruity_table)
+chisq.test(choco_fruity_table)
+```
+
+- strong evidence that `chocolate` or `fruity` candies are not independent.
+
+#### Margins of continuous variables
+
+```{r}
+contvars_long <- candy_dat |>
+  select(winpercent, sugarpercent, pricepercent) |>
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value")
+
+ggplot(contvars_long, aes(x = Value)) +
+  geom_histogram(bins = 20, fill = "skyblue", color = "black") +
+  geom_density(fill = "skyblue", color = "black", alpha = 0.5) +
+  facet_wrap(~ Variable, scales = "free_x") +
+  labs(title = "Marginal Distributions of Continuous Variables",
+       x = "Value",
+       y = "Count")
+```
+
+- `winpercent` is slightly right-skewed -> 
+- `pricepercent` and `sugarpercent` both show multiple peaks. Difficult to discern a clear pattern. However the different peaks might indicate some bimodality (especially in `pricepercent`.
+
+**Hypothesis**: There is clustering in the pricing of the different candies
+
+```{r}
+# Standardize pricepercent and winpercent
+candy_dat_stand <- candy_dat |>
+  mutate(pricepercent_stand = (pricepercent - mean(pricepercent)) / sd(pricepercent),
+         winpercent_stand = (winpercent - mean(winpercent)) / sd(winpercent)) |>
+  select(pricepercent_stand, winpercent_stand)
+
+# Perform k-means clustering on the standardized data
+kmeans_cluster <- kmeans(candy_dat_stand, centers = 3)
+kmeans_cluster
+
+# Create new tibble with additional cluster and precise chocolate indicator variable
+candy_dat_stand <- candy_dat |>
+  mutate(pricepercent_stand = (pricepercent - mean(pricepercent)) / sd(pricepercent),
+         winpercent_stand = (winpercent - mean(winpercent)) / sd(winpercent),
+         cluster = as.factor(kmeans_cluster$cluster),
+         chocolate_indicator = ifelse(chocolate == "Yes", "Contains Chocolate", "No Chocolate"))
+
+# Plot the clusters using only numeric data
+fviz_cluster(kmeans_cluster, 
+             data = candy_dat_stand %>% select(pricepercent_stand, winpercent_stand),  
+             geom = "point", 
+             pointsize = 1, 
+             show.clust.cent = FALSE) +
+   geom_point(data = candy_dat_stand,  
+              aes(x = pricepercent_stand, y = winpercent_stand, 
+                  shape = chocolate_indicator, color = cluster), size = 3) +
+   labs(title = "K-means Clustering of Candies with Chocolate Indicator",
+        subtitle = "Clusters with Standardized Variables",
+        shape = "Chocolate Content",
+        color = "Cluster")
+
+```
+
+- Candies containing chocolate are mostly found in Cluster 3, which is associated with higher popularity and higher prices.
+
+```{r}
+ggplot(select(candy_dat, sugarpercent, chocolate),
+       mapping = aes(x = sugarpercent, fill = factor(chocolate))) +
+  geom_histogram(aes(y = ..density..), position = "identity", bins = 20, alpha = 0.4, color = "black") +
+  geom_density(alpha = 0.6) +
+  geom_vline(aes(xintercept = mean(sugarpercent[chocolate == "Yes"])), color = "blue", linetype = "dashed", size = 1) +
+  geom_vline(aes(xintercept = mean(sugarpercent[chocolate == "No"])), color = "red", linetype = "dashed", size = 1) +
+  labs(title = "Distribution of Sugar Percentage",
+       x = "Sugar Percentage",
+       y = "Density",
+       fill = "Contains Chocolate")
+```
+
+Lets also check the conditional distribution of `winpercent` given `chocolate`, `bar`, `peanutyalmondy`, `fruity` since these seem to be particularly important for prediction `winpercent`:
+
+```{r}
+candy_long <- candy_dat_numeric |>
+  select(winpercent, chocolate, bar, peanutyalmondy, fruity) |>
+  pivot_longer(cols = chocolate:fruity, names_to = "Variable", values_to = "Value")
+
+ggplot(candy_long, aes(x = factor(Value), y = winpercent)) +
+  geom_boxplot(fill = "skyblue", color = "black") +
+  facet_wrap(~ Variable, scales = "free_x") +
+  labs(title = "Win Percentage by Candy Attributes",
+       x = "Attribute Presence (1 = Yes, 0 = No)",
+       y = "Win Percentage") 
+```
+
+This is in line with previous observations:
+- median for `winpercent` is greater when `bar`, `chocolate`, `peanutyalmondy` is present -> candies having these attributes are more popular than candies without having these attributes
+- `fruity` is less liked when present
+
+## Business Analysis
+
+### Linear Regression
+
+Linear regression is a very simple model but given the sample size and the relative ease at which we can interpret LR coefficients, I stick with that.
+
+```{r}
+lin_m1 <- lm(winpercent ~ . + chocolate*peanutyalmondy, data = select(candy_dat, -competitorname))
+summary(lin_m1)
+# plot(lin_m1)
+```
+
+# Optional
+
+## Machine Learning Perspective
+
+This section acts as a small introduction to the `mlr3` package. I will briefly explain each step in the modelling process.
+
+First we have create a new instance of the type regression (task):
+
+```{r}
+tsk_candy <- as_task_regr(select(candy_dat, -competitorname), target = "winpercent", id = "candy")
+tsk_candy
+```
+
+Here is another way to plot a pairs plot from above:
+
+```{r}
+# autoplot(tsk_candy, type = "pairs")
+```
+
+We can retrieve various metadata from the task object:
+
+```{r}
+c(tsk_candy$nrow, tsk_candy$ncol)
+
+c(Feature <- tsk_candy$feature_names, Target = tsk_candy$target_names)
+
+head(tsk_candy$row_ids)
+```
+
+We can access data by row ID:
+
+```{r}
+tsk_candy$data()
+tsk_candy$data(rows = c(1, 82))
+```
+
+Important to note, `mlr3` is based on R6 and thus uses reference semantics. Therefore, if you want to copy the task to modify the dataset, you can't just assign the task to a new object. The original object will still be affected. Use `$clone$ instead.
+
+To model the data we can use "learners", an object that acts as an interface to a set of machine learning models. Here we create a learner for training a decision tree:
+
+```{r}
+lrn_dectree <- lrn("regr.rpart")
+```
+
+To fit the model to the data we just have to pass the task to the learner:
+
+```{r}
+lrn_dectree$train(tsk_candy)
+
+lrn_dectree$model
+```
+
+For a train-test split we can do the following:
+
+```{r}
+splits <- partition(tsk_candy)
+splits
+
+lrn_dectree$train(tsk_candy, row_ids = splits$train)
+lrn_dectree$model
+```
+
+Predicting on the test set can then be done with `predict`:
+
+```{r}
+prediction <- lrn_dectree$predict(tsk_candy, row_ids = splits$test)
+prediction
+```
+
+```{r}
+# autoplot(prediction)
+```
+
+In case you want to tune hyperparameters, you can access the parameter set of a specific machine learning model via:
+
+```{r}
+lrn_dectree$param_set
+```
+
+We can now set parameters to a different value, e.g. set tree maxdepth to 1.
+
+```{r}
+lrn_dectree_diffparam = lrn("regr.rpart", maxdepth = 1)
+lrn_dectree_diffparam$train(tsk_candy)
+lrn_dectree_diffparam$model
+```
+
+To summarize:
+
+```{r}
+tsk_candy <- as_task_regr(select(candy_dat, -competitorname), target = "winpercent", id = "candy")
+lrn_dectree <- lrn("regr.rpart")
+splits <- partition(tsk_candy, ratio = 0.8)
+lrn_dectree$train(tsk_candy, row_ids = splits$train)
+lrn_dectree$model
+```
+
+We can now evaluate our model against a metric.
+
+```{r}
+measures = msrs(c("regr.mse", "regr.mae"))
+prediction$score(measures)
+```
+
+```{r}
+technical_measures = msrs(c("time_train", "time_predict", "time_both"))
+prediction$score(technical_measures, learner = lrn_dectree)
+```
+
